@@ -1,0 +1,39 @@
+# Discord Bot Configuration
+
+# Bot configurations with their respective directories, main scripts, and color codes
+bots:
+  ARKBots:
+    script: main.py
+    color: green
+    directory: ARKBots
+    description: ARK-related bot services
+
+  NeuroBeam:
+    script: app.py
+    color: cyan
+    directory: NeuroBeam
+    description: NeuroBeam bot application
+
+  NeuroBot:
+    script: new-NeuroBot.py
+    color: yellow
+    directory: NeuroBot
+    description: NeuroBot primary application
+
+  NeuroTickets:
+    script: main.py
+    color: orange
+    directory: NeuroTickets
+    description: Ticket management bot
+
+  Task-Master:
+    script: bot.py
+    color: magenta
+    directory: Task-Master
+    description: Discord Bot variant of Task-Master
+
+# Global bot runner settings
+global_settings:
+  log_directory: logs
+  max_restart_attempts: 3
+  restart_delay: 5  # seconds between restart attempts
