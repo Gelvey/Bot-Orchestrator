@@ -1,2 +1,2 @@
-
-start ARKBots
+# Commands will be appended here by users or other systems
+# Example: start ARKBots

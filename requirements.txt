@@ -1,2 +1,7 @@
-PyYAML>=5.4
-discord.py>=2.0.0
+# Core dependencies for Bot Orchestrator
+PyYAML>=5.4,<7.0
+discord.py>=2.0.0,<3.0
+
+# Development dependencies (optional)
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+# Or install all: pip install -e .[dev]
