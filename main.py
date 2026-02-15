@@ -13,25 +13,48 @@ from threading import Lock, Event
 from contextlib import closing
 import queue
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Constants
+COMMAND_CHECK_INTERVAL = 2  # seconds
+PROCESS_STOP_TIMEOUT = 10  # seconds
+PROCESS_FORCE_KILL_TIMEOUT = 15  # seconds
+DEFAULT_LOG_LEVEL = logging.INFO
 
 class BotManager:
+    """
+    Manages multiple bot subprocesses with state persistence and graceful shutdown.
+    
+    Features:
+    - Start, stop, restart, and monitor bot processes
+    - Persist bot states in SQLite database
+    - Colorized console output per bot
+    - Command file interface for dynamic control
+    - Automatic state restoration on startup
+    - Graceful shutdown with state preservation
+    """
+    
     def __init__(self, config_path: str = 'bot_config.yaml', commands_file: str = 'bot_commands.txt', db_path: str = 'bot_states.db'):
+        """
+        Initialize the BotManager.
+        
+        Args:
+            config_path: Path to YAML configuration file
+            commands_file: Path to file for runtime commands
+            db_path: Path to SQLite database for state persistence
+        """
         # Use absolute path for config and base directory
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = os.path.join(self.base_dir, config_path)
         self.commands_file_path = os.path.join(self.base_dir, commands_file)
         self.db_path = os.path.join(self.base_dir, db_path)
         
-        # Replace weakref.WeakValueDictionary with a regular dictionary
+        # Bot process tracking
         self.processes: Dict[str, Dict] = {}
         
         self.logger = self._setup_logging()
         self.config = self._load_config()
-        self.lock = threading.Lock()  # Added for thread safety
-        self.shutdown_event = Event()  # Signal for graceful shutdown
-        self.command_queue = queue.Queue()  # Queue for processing commands
+        self.lock = threading.Lock()
+        self.shutdown_event = Event()
+        self.command_queue = queue.Queue()
         
         self.COLORS = {
             'reset': '\033[0m',
@@ -46,7 +69,9 @@ class BotManager:
         
         # Ensure commands file exists
         if not os.path.exists(self.commands_file_path):
-            open(self.commands_file_path, 'w').close()
+            with open(self.commands_file_path, 'w') as f:
+                f.write('# Commands will be appended here by users or other systems\n')
+                f.write('# Example: start ARKBots\n')
         
         # Setup database
         self._setup_database()
@@ -56,11 +81,17 @@ class BotManager:
         signal.signal(signal.SIGTERM, self._handle_exit)
 
     def _setup_logging(self) -> logging.Logger:
+        """
+        Set up logging to both file and console.
+        
+        Returns:
+            Configured logger instance for BotManager
+        """
         log_dir = os.path.join(self.base_dir, 'logs')
         os.makedirs(log_dir, exist_ok=True)
         
         logging.basicConfig(
-            level=logging.INFO,
+            level=DEFAULT_LOG_LEVEL,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(os.path.join(log_dir, 'bot_manager.log')),
@@ -88,7 +119,12 @@ class BotManager:
 
     def _save_bot_state(self, bot_name: str, is_running: bool, preserved_state: bool = None):
         """
-        Save bot state to database
+        Save bot state to database.
+        
+        Args:
+            bot_name: Name of the bot
+            is_running: Whether bot is currently running
+            preserved_state: Optional flag to mark bot for restoration on restart
         """
         try:
             with closing(sqlite3.connect(self.db_path)) as conn:
@@ -122,7 +158,12 @@ class BotManager:
     def _get_bot_saved_state(self, bot_name: str) -> bool:
         """
         Retrieve bot's saved state from database.
-        Check the preserved_state field if we're starting up.
+        
+        Args:
+            bot_name: Name of the bot to check
+            
+        Returns:
+            True if bot was running before shutdown, False otherwise
         """
         try:
             with closing(sqlite3.connect(self.db_path)) as conn:
@@ -133,7 +174,7 @@ class BotManager:
                 if not result:
                     return False
                 
-                # Check preserved_state first (which tracks if the bot was running before shutdown)
+                # Check preserved_state first (tracks if bot was running before shutdown)
                 # Then fall back to is_running
                 return result[1] == 1 if result[1] is not None else (result[0] == 1)
         except Exception as e:
@@ -141,18 +182,28 @@ class BotManager:
             return False
 
     def _load_config(self) -> Dict:
+        """
+        Load and validate bot configuration from YAML file.
+        
+        Returns:
+            Dictionary containing bot configurations
+            
+        Raises:
+            SystemExit: If configuration is invalid
+        """
         try:
             with open(self.config_path, 'r') as f:
                 config = yaml.safe_load(f)
             
             if not isinstance(config, dict) or 'bots' not in config:
-                raise ValueError("Invalid configuration format")
+                raise ValueError("Invalid configuration format: missing 'bots' section")
             
             # Validate bot configurations
             for bot_name, bot_config in config['bots'].items():
                 if 'script' not in bot_config or 'directory' not in bot_config:
-                    raise ValueError(f"Bot {bot_name} is missing required fields (script, directory)")
+                    raise ValueError(f"Bot '{bot_name}' is missing required fields (script, directory)")
             
+            self.logger.info(f"Loaded configuration for {len(config['bots'])} bots")
             return config
         except FileNotFoundError:
             self.logger.warning(f"Config file {self.config_path} not found. Creating default.")
@@ -211,7 +262,7 @@ class BotManager:
 
             # Wait for stop threads with a timeout
             for thread in stop_threads:
-                thread.join(timeout=10)  # 10-second timeout per bot
+                thread.join(timeout=PROCESS_STOP_TIMEOUT)
 
             # Force terminate any remaining processes
             with self.lock:
@@ -250,8 +301,8 @@ class BotManager:
             process.terminate()
 
             try:
-                # Wait up to 10 seconds for process to exit
-                process.wait(timeout=10)
+                # Wait for process to exit gracefully
+                process.wait(timeout=PROCESS_STOP_TIMEOUT)
                 self.logger.info(f"{bot_name} exited gracefully.")
             except subprocess.TimeoutExpired:
                 # Send SIGKILL if process doesn't exit
@@ -468,7 +519,7 @@ class BotManager:
                         f.truncate()
                 
                 # Wait before checking again
-                time.sleep(2)
+                time.sleep(COMMAND_CHECK_INTERVAL)
             
             except Exception as e:
                 self.logger.error(f"Error in command file processing: {e}")
@@ -494,8 +545,8 @@ class BotManager:
                 self.logger.info(f"Attempting to stop {bot_name} (PID {process.pid})...")
                 process.terminate()
                 try:
-                    # Wait up to 15 seconds for process to exit
-                    process.wait(timeout=15)
+                    # Wait for process to exit gracefully
+                    process.wait(timeout=PROCESS_FORCE_KILL_TIMEOUT)
                     self.logger.info(f"{bot_name} exited gracefully with code {process.returncode}")
                 except subprocess.TimeoutExpired:
                     # Force kill if process doesn't exit
