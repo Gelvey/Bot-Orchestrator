@@ -1,0 +1,2 @@
+PyYAML>=5.4
+discord.py>=2.0.0
