@@ -68,7 +68,7 @@ The manager persists bot states in `bot_states.db` (SQLite) including:
 
 ## Logging
 
-Logs are written to `logs/bot_manager.log` and displayed in the console with colorized output per bot.
+Logs are written to `logs/bot_manager.log` and displayed in the console with colorised output per bot.
 
 ## Development
 
