@@ -433,6 +433,22 @@ class BotManager:
         """
         return bool(bot_config.get('force_sync', False))
 
+    def _is_safe_auto_update_target(self, directory: str) -> bool:
+        """
+        Ensure auto-update target is not the orchestrator directory itself
+        or one of its parent directories.
+        """
+        base_dir_abs = os.path.abspath(self.base_dir)
+        target_abs = os.path.abspath(directory)
+
+        if target_abs == base_dir_abs:
+            return False
+
+        if base_dir_abs.startswith(target_abs + os.sep):
+            return False
+
+        return True
+
     def _get_preserve_files(self, bot_config: Dict) -> List[str]:
         """
         Return a list of relative file paths that should be preserved across
@@ -701,6 +717,12 @@ class BotManager:
 
         if not os.path.isdir(directory):
             self.logger.warning(f"Auto-update skipped for {bot_name}: directory {directory} not found")
+            return
+
+        if not self._is_safe_auto_update_target(directory):
+            self.logger.warning(
+                f"Auto-update skipped for {bot_name}: unsafe update target {directory} overlaps orchestrator path"
+            )
             return
 
         try:

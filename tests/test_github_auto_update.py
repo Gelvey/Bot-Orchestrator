@@ -158,3 +158,13 @@ def test_update_bot_from_repo_force_sync_when_local_changes(tmp_path):
         bot_config["repo_url"],
         [".env", "config/local.yaml"],
     )
+
+
+def test_update_bot_from_repo_skips_when_target_is_orchestrator_directory(tmp_path):
+    manager, _ = _create_manager(tmp_path, auto_update=True)
+    bot_config = manager.config["bots"]["TestBot"]
+
+    with patch("main.subprocess.run") as run_mock:
+        manager._update_bot_from_repo("TestBot", bot_config, manager.base_dir)
+
+    run_mock.assert_not_called()
