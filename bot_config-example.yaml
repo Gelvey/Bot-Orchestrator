@@ -31,6 +31,7 @@ bots:
 
 # Global bot runner settings
 global_settings:
+  suppress_discord_messages: false
   log_directory: logs
   max_restart_attempts: 3
   restart_delay: 5  # seconds between restart attempts

@@ -488,6 +488,36 @@ class BotManager:
 
         return target_abs not in blocked_paths
 
+    def _is_discord_message_suppression_enabled(self) -> bool:
+        """
+        Return whether Discord-style message lines should be suppressed
+        from console output globally.
+        """
+        global_settings = self.config.get('global_settings', {})
+        if not isinstance(global_settings, dict):
+            self.logger.warning("Invalid global_settings section; expected mapping, defaulting suppress_discord_messages to false")
+            return False
+
+        suppression_value = global_settings.get('suppress_discord_messages', False)
+        if isinstance(suppression_value, bool):
+            return suppression_value
+
+        self.logger.warning(
+            "Invalid global_settings.suppress_discord_messages value; expected boolean, defaulting to false"
+        )
+        return False
+
+    def _should_suppress_discord_output_line(self, line: str, suppress_discord_messages: bool) -> bool:
+        """
+        Determine whether a bot output line should be suppressed when
+        Discord message suppression is enabled.
+        """
+        if not suppress_discord_messages:
+            return False
+
+        normalized_line = line.casefold()
+        return 'discord' in normalized_line and 'message' in normalized_line
+
     def _get_preserve_files(self, bot_config: Dict) -> List[str]:
         """
         Return a list of relative file paths that should be preserved across
@@ -767,6 +797,7 @@ class BotManager:
         # Correct path handling: Use absolute paths
         script_path = os.path.join(directory, script)
         color = bot_config.get('color', 'white')
+        suppress_discord_messages = self._is_discord_message_suppression_enabled()
 
         if not os.path.exists(script_path):
             self.logger.warning(f"Script {script_path} does not exist. Searching for alternatives...")
@@ -809,7 +840,7 @@ class BotManager:
 
                 output_thread = threading.Thread(
                     target=self._stream_output, 
-                    args=(process, bot_name, color),
+                    args=(process, bot_name, color, suppress_discord_messages),
                     daemon=True
                 )
                 output_thread.start()
@@ -985,7 +1016,13 @@ class BotManager:
             self.logger.exception(f"An error occurred while resuming bot {bot_name}: {e}")
             return False
 
-    def _stream_output(self, process: subprocess.Popen, bot_name: str, color: str):
+    def _stream_output(
+        self,
+        process: subprocess.Popen,
+        bot_name: str,
+        color: str,
+        suppress_discord_messages: bool = False
+    ):
         """
         Stream output from a bot process with color coding.
         """
@@ -996,6 +1033,8 @@ class BotManager:
             for line in iter(stream.readline, ''):
                 if self.shutdown_event.is_set():
                     break
+                if self._should_suppress_discord_output_line(line, suppress_discord_messages):
+                    continue
                 if is_error:
                     sys.stderr.write(f"{prefix}{line}")
                     sys.stderr.flush()

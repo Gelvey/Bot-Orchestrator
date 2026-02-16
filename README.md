@@ -100,6 +100,7 @@ bots:
 			- config/local.yaml
 
 global_settings:
+	suppress_discord_messages: false
 	log_directory: logs
 	max_restart_attempts: 3
 	restart_delay: 5
@@ -116,6 +117,13 @@ global_settings:
 - `auto_update` (optional, default `true` if `repo_url` exists): Toggle auto-update
 - `force_sync` (optional, default `false`): Replace directory contents with archive contents; when `false`, archive files are merged into existing directory
 - `preserve_files` (optional): List of relative files/directories to restore after force-sync
+
+### Global settings keys
+
+- `suppress_discord_messages` (optional, default `false`): Suppress bot output lines that contain both `discord` and `message` for all bots
+- `log_directory` (optional): Log directory name
+- `max_restart_attempts` (optional): Reserved for restart policy
+- `restart_delay` (optional): Reserved for restart policy delay in seconds
 
 ### Auto-update behavior
 
@@ -149,6 +157,7 @@ If `force_sync: true`, manager clears directory contents before sync. In both mo
 
 - Console logs + `logs/bot_manager.log`
 - Bot output is streamed with `[BotName]` prefixes and configured color
+- With `global_settings.suppress_discord_messages: true`, Discord message lines are hidden from console output for all bots
 
 ## Development & Testing
 
