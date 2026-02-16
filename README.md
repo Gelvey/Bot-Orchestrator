@@ -53,7 +53,7 @@ echo "status_all" >> bot_commands.txt
 
 ## Configuration
 
-- **`bot_config.yaml`**: Defines bots, their directories, scripts, and console colors
+- **`bot_config.yaml`**: Defines bots, their directories, scripts, console colors, and optional per-bot GitHub auto-update settings (`repo_url`, `auto_update`)
 - **`bot_commands.txt`**: Runtime command interface (automatically created)
 - **`.env.example`**: Template for bot-specific environment variables
 - **Example bots**: Located in `examples/` directory for local testing without real tokens

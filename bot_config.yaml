@@ -7,12 +7,16 @@ bots:
     color: yellow
     directory: HelperBot
     description: Helper utilities example bot
+    repo_url: https://github.com/example/HelperBot.git
+    auto_update: false
 
   ChatAssistant:
     script: main.py
     color: magenta
     directory: ChatAssistant
     description: Minimal chat assistant example
+    repo_url: https://github.com/example/ChatAssistant.git
+    auto_update: true
 
   DataBot:
     script: main.py

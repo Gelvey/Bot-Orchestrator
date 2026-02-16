@@ -387,6 +387,84 @@ class BotManager:
         except Exception as e:
             self.logger.error(f"Error closing database connections: {e}")
 
+    def _should_auto_update_bot(self, bot_config: Dict) -> bool:
+        """
+        Determine if GitHub auto-update should run for a bot.
+        """
+        repo_url = bot_config.get('repo_url')
+        if not repo_url:
+            return False
+        return bot_config.get('auto_update', True)
+
+    def _update_bot_from_repo(self, bot_name: str, bot_config: Dict, directory: str):
+        """
+        Optionally update bot code from configured GitHub repository.
+        """
+        if not self._should_auto_update_bot(bot_config):
+            return
+
+        repo_url = bot_config.get('repo_url')
+
+        if not os.path.isdir(directory):
+            self.logger.warning(f"Auto-update skipped for {bot_name}: directory {directory} not found")
+            return
+
+        git_dir = os.path.join(directory, '.git')
+        if not os.path.isdir(git_dir):
+            self.logger.warning(f"Auto-update skipped for {bot_name}: {directory} is not a git repository")
+            return
+
+        try:
+            status_result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=directory,
+                capture_output=True,
+                text=True
+            )
+            if status_result.returncode != 0:
+                self.logger.warning(
+                    f"Auto-update skipped for {bot_name}: unable to check git status ({status_result.stderr.strip()})"
+                )
+                return
+
+            if status_result.stdout.strip():
+                self.logger.warning(f"Auto-update skipped for {bot_name}: local changes detected in {directory}")
+                return
+
+            remote_result = subprocess.run(
+                ['git', 'remote', 'get-url', 'origin'],
+                cwd=directory,
+                capture_output=True,
+                text=True
+            )
+            if remote_result.returncode != 0:
+                self.logger.warning(
+                    f"Auto-update skipped for {bot_name}: unable to read origin remote ({remote_result.stderr.strip()})"
+                )
+                return
+
+            current_remote = remote_result.stdout.strip()
+            if current_remote != repo_url:
+                self.logger.warning(
+                    f"Auto-update skipped for {bot_name}: configured repo URL does not match origin remote"
+                )
+                return
+
+            pull_result = subprocess.run(
+                ['git', 'pull', '--ff-only'],
+                cwd=directory,
+                capture_output=True,
+                text=True
+            )
+            if pull_result.returncode == 0:
+                self.logger.info(f"Auto-update completed for {bot_name}: {pull_result.stdout.strip()}")
+            else:
+                self.logger.warning(
+                    f"Auto-update failed for {bot_name}: {pull_result.stderr.strip() or pull_result.stdout.strip()}"
+                )
+        except Exception as e:
+            self.logger.warning(f"Auto-update failed for {bot_name}: {e}")
+
     def start_bot(self, bot_name: str):
         """
         Start a specific bot with corrected directory handling
@@ -400,6 +478,8 @@ class BotManager:
         # Use absolute paths
         directory = os.path.join(self.base_dir, bot_config.get('directory', bot_name))
         script = bot_config.get('script', 'main.py')
+
+        self._update_bot_from_repo(bot_name, bot_config, directory)
         
         # Correct path handling: Use absolute paths
         script_path = os.path.join(directory, script)
