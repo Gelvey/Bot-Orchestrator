@@ -18,6 +18,7 @@ COMMAND_CHECK_INTERVAL = 2  # seconds
 PROCESS_STOP_TIMEOUT = 10  # seconds
 PROCESS_FORCE_KILL_TIMEOUT = 15  # seconds
 DEFAULT_LOG_LEVEL = logging.INFO
+GIT_COMMAND_TIMEOUT = 30  # seconds
 
 class BotManager:
     """
@@ -390,6 +391,8 @@ class BotManager:
     def _should_auto_update_bot(self, bot_config: Dict) -> bool:
         """
         Determine if GitHub auto-update should run for a bot.
+        Returns True only when repo_url is configured and auto_update is not False
+        (defaults to True when repo_url exists).
         """
         repo_url = bot_config.get('repo_url')
         if not repo_url:
@@ -399,6 +402,8 @@ class BotManager:
     def _update_bot_from_repo(self, bot_name: str, bot_config: Dict, directory: str):
         """
         Optionally update bot code from configured GitHub repository.
+        Validates git repo state (clean working tree, origin URL match) and uses
+        `git pull --ff-only` to avoid unintended overwrites.
         """
         if not self._should_auto_update_bot(bot_config):
             return
@@ -419,7 +424,9 @@ class BotManager:
                 ['git', 'status', '--porcelain'],
                 cwd=directory,
                 capture_output=True,
-                text=True
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT
             )
             if status_result.returncode != 0:
                 self.logger.warning(
@@ -435,7 +442,9 @@ class BotManager:
                 ['git', 'remote', 'get-url', 'origin'],
                 cwd=directory,
                 capture_output=True,
-                text=True
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT
             )
             if remote_result.returncode != 0:
                 self.logger.warning(
@@ -454,7 +463,9 @@ class BotManager:
                 ['git', 'pull', '--ff-only'],
                 cwd=directory,
                 capture_output=True,
-                text=True
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT
             )
             if pull_result.returncode == 0:
                 self.logger.info(f"Auto-update completed for {bot_name}: {pull_result.stdout.strip()}")
