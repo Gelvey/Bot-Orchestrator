@@ -438,8 +438,8 @@ class BotManager:
         Ensure auto-update target is not the orchestrator directory itself
         or one of its parent directories.
         """
-        base_dir_abs = os.path.abspath(self.base_dir)
-        target_abs = os.path.abspath(directory)
+        base_dir_abs = os.path.realpath(os.path.abspath(self.base_dir))
+        target_abs = os.path.realpath(os.path.abspath(directory))
 
         if target_abs == base_dir_abs:
             return False
@@ -922,6 +922,8 @@ class BotManager:
                         for command in commands:
                             command = command.strip()
                             if not command:
+                                continue
+                            if command.startswith('#'):
                                 continue
                             
                             self.logger.info(f"Processing command: {command}")

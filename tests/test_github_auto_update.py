@@ -2,6 +2,7 @@ import subprocess
 import os
 import sys
 from unittest.mock import patch
+import pytest
 
 import yaml
 
@@ -166,5 +167,21 @@ def test_update_bot_from_repo_skips_when_target_is_orchestrator_directory(tmp_pa
 
     with patch("main.subprocess.run") as run_mock:
         manager._update_bot_from_repo("TestBot", bot_config, manager.base_dir)
+
+    run_mock.assert_not_called()
+
+
+def test_update_bot_from_repo_skips_when_target_symlinks_to_orchestrator(tmp_path):
+    manager, _ = _create_manager(tmp_path, auto_update=True)
+    bot_config = manager.config["bots"]["TestBot"]
+
+    symlink_path = tmp_path / "orchestrator_link"
+    try:
+        os.symlink(manager.base_dir, symlink_path)
+    except OSError:
+        pytest.skip("Symlinks are not supported on this environment")
+
+    with patch("main.subprocess.run") as run_mock:
+        manager._update_bot_from_repo("TestBot", bot_config, str(symlink_path))
 
     run_mock.assert_not_called()
