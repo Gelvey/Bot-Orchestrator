@@ -71,10 +71,7 @@ class BotManager:
         }
         
         # Ensure commands file exists
-        if not os.path.exists(self.commands_file_path):
-            with open(self.commands_file_path, 'w') as f:
-                f.write('# Commands will be appended here by users or other systems\n')
-                f.write('# Example: start ARKBots\n')
+        self._ensure_commands_file_exists()
         
         # Setup database
         self._setup_database()
@@ -102,6 +99,34 @@ class BotManager:
             ]
         )
         return logging.getLogger('BotManager')
+
+    def _ensure_commands_file_exists(self, log_if_created: bool = False) -> bool:
+        """
+        Ensure command file and its parent directory exist.
+
+        Args:
+            log_if_created: Whether to emit a warning when the file is recreated
+
+        Returns:
+            True when file exists or was created successfully, False otherwise
+        """
+        try:
+            commands_dir = os.path.dirname(self.commands_file_path)
+            if commands_dir:
+                os.makedirs(commands_dir, exist_ok=True)
+
+            if not os.path.exists(self.commands_file_path):
+                with open(self.commands_file_path, 'w') as f:
+                    f.write('# Commands will be appended here by users or other systems\n')
+                    f.write('# Example: start ARKBots\n')
+
+                if log_if_created:
+                    self.logger.warning(f"Recreated missing command file: {self.commands_file_path}")
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to ensure command file exists at {self.commands_file_path}: {e}")
+            return False
 
     def _setup_database(self):
         """
@@ -862,6 +887,10 @@ class BotManager:
         """
         while not self.shutdown_event.is_set():
             try:
+                if not self._ensure_commands_file_exists(log_if_created=True):
+                    time.sleep(5)
+                    continue
+
                 # Read commands file
                 with open(self.commands_file_path, 'r+') as f:
                     commands = f.readlines()
@@ -907,6 +936,10 @@ class BotManager:
                         f.truncate()
                 
                 # Wait before checking again
+                time.sleep(COMMAND_CHECK_INTERVAL)
+
+            except FileNotFoundError:
+                self._ensure_commands_file_exists(log_if_created=True)
                 time.sleep(COMMAND_CHECK_INTERVAL)
             
             except Exception as e:
