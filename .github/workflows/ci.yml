@@ -16,5 +16,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+      - name: Prepare test fixtures
+        run: |
+          if [ ! -f bot_config.yaml ]; then
+            cp bot_config-example.yaml bot_config.yaml
+          fi
+          touch bot_commands.txt
       - name: Run tests
         run: pytest -q

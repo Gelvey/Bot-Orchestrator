@@ -17,6 +17,10 @@ bots:
     description: Minimal chat assistant example
     repo_url: https://github.com/example/ChatAssistant.git
     auto_update: true
+    force_sync: false
+    preserve_files:
+      - .env
+      - config/local.yaml
 
   DataBot:
     script: main.py
