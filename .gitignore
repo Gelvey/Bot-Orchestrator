@@ -8,6 +8,7 @@ env/
 *.env
 .env
 *.sqlite3
+bot_config.yaml
 coverage.xml
 htmlcov/
 dist/

@@ -1,4 +1,3 @@
-import subprocess
 import os
 import sys
 from unittest.mock import patch
@@ -13,7 +12,6 @@ from main import BotManager
 def _create_manager(tmp_path, auto_update=True, extra_bot_config=None):
     bot_dir = tmp_path / "TestBot"
     bot_dir.mkdir()
-    (bot_dir / ".git").mkdir()
 
     bot_config = {
         "script": "main.py",
@@ -44,131 +42,97 @@ def test_update_bot_from_repo_pulls_when_clean(tmp_path):
     manager, directory = _create_manager(tmp_path, auto_update=True)
     bot_config = manager.config["bots"]["TestBot"]
 
-    with patch("main.subprocess.run") as run_mock:
-        run_mock.side_effect = [
-            subprocess.CompletedProcess(["git", "rev-parse", "--show-toplevel"], 0, stdout=directory + "\n", stderr=""),
-            subprocess.CompletedProcess(["git", "status", "--porcelain"], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess(
-                ["git", "remote", "get-url", "origin"], 0, stdout=bot_config["repo_url"] + "\n", stderr=""
-            ),
-            subprocess.CompletedProcess(["git", "pull", "--ff-only"], 0, stdout="Already up to date.\n", stderr=""),
-        ]
-
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
         manager._update_bot_from_repo("TestBot", bot_config, directory)
 
-    assert run_mock.call_count == 4
-    assert run_mock.call_args_list[3][0][0] == ["git", "pull", "--ff-only"]
+    sync_mock.assert_called_once_with(
+        "TestBot",
+        directory,
+        bot_config["repo_url"],
+        [],
+        False,
+        None,
+    )
 
 
 def test_update_bot_from_repo_skips_pull_with_local_changes(tmp_path):
     manager, directory = _create_manager(tmp_path, auto_update=True)
     bot_config = manager.config["bots"]["TestBot"]
 
-    with patch("main.subprocess.run") as run_mock:
-        run_mock.side_effect = [
-            subprocess.CompletedProcess(["git", "rev-parse", "--show-toplevel"], 0, stdout=directory + "\n", stderr=""),
-            subprocess.CompletedProcess(["git", "status", "--porcelain"], 0, stdout=" M main.py\n", stderr=""),
-        ]
-
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
         manager._update_bot_from_repo("TestBot", bot_config, directory)
 
-    assert run_mock.call_count == 2
+    sync_mock.assert_called_once()
 
 
 def test_update_bot_from_repo_skips_when_disabled(tmp_path):
     manager, directory = _create_manager(tmp_path, auto_update=False)
     bot_config = manager.config["bots"]["TestBot"]
 
-    with patch("main.subprocess.run") as run_mock:
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
         manager._update_bot_from_repo("TestBot", bot_config, directory)
 
-    run_mock.assert_not_called()
+    sync_mock.assert_not_called()
 
 
-def test_update_bot_from_repo_skips_when_not_in_git_repo(tmp_path):
+def test_update_bot_from_repo_skips_when_directory_missing(tmp_path):
     manager, directory = _create_manager(tmp_path, auto_update=True)
     bot_config = manager.config["bots"]["TestBot"]
+    missing_dir = os.path.join(directory, "missing")
 
-    with patch("main.subprocess.run") as run_mock:
-        run_mock.side_effect = [
-            subprocess.CompletedProcess(
-                ["git", "rev-parse", "--show-toplevel"],
-                128,
-                stdout="",
-                stderr="fatal: not a git repository",
-            ),
-            subprocess.CompletedProcess(
-                ["git", "init"],
-                1,
-                stdout="",
-                stderr="fatal: not a git repository",
-            ),
-        ]
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
+        manager._update_bot_from_repo("TestBot", bot_config, missing_dir)
 
-        manager._update_bot_from_repo("TestBot", bot_config, directory)
-
-    assert run_mock.call_count == 2
+    sync_mock.assert_not_called()
 
 
-def test_update_bot_from_repo_bootstraps_and_pulls_when_not_git_repo(tmp_path):
+def test_update_bot_from_repo_uses_force_sync_and_preserve_files(tmp_path):
     manager, directory = _create_manager(tmp_path, auto_update=True)
     bot_config = manager.config["bots"]["TestBot"]
+    bot_config["force_sync"] = True
+    bot_config["preserve_files"] = [".env", "config/local.yaml"]
+    bot_config["repo_branch"] = "develop"
 
-    with patch("main.subprocess.run") as run_mock:
-        run_mock.side_effect = [
-            subprocess.CompletedProcess(["git", "rev-parse", "--show-toplevel"], 128, stdout="", stderr="fatal"),
-            subprocess.CompletedProcess(["git", "init"], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess(["git", "remote", "add", "origin", bot_config["repo_url"]], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess(["git", "fetch", "origin"], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], 0, stdout="origin/main\n", stderr=""),
-            subprocess.CompletedProcess(["git", "reset", "--hard", "origin/main"], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess(["git", "rev-parse", "--show-toplevel"], 0, stdout=directory + "\n", stderr=""),
-            subprocess.CompletedProcess(["git", "status", "--porcelain"], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess(
-                ["git", "remote", "get-url", "origin"], 0, stdout=bot_config["repo_url"] + "\n", stderr=""
-            ),
-            subprocess.CompletedProcess(["git", "pull", "--ff-only"], 0, stdout="Already up to date.\n", stderr=""),
-        ]
-
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
         manager._update_bot_from_repo("TestBot", bot_config, directory)
 
-    assert run_mock.call_count == 10
-    assert run_mock.call_args_list[9][0][0] == ["git", "pull", "--ff-only"]
-
-
-def test_update_bot_from_repo_force_sync_when_local_changes(tmp_path):
-    manager, directory = _create_manager(
-        tmp_path,
-        auto_update=True,
-        extra_bot_config={"force_sync": True, "preserve_files": [".env", "config/local.yaml"]},
-    )
-    bot_config = manager.config["bots"]["TestBot"]
-
-    with patch("main.subprocess.run") as run_mock, patch.object(manager, "_force_sync_bot_repo", return_value=True) as force_mock:
-        run_mock.side_effect = [
-            subprocess.CompletedProcess(["git", "rev-parse", "--show-toplevel"], 0, stdout=directory + "\n", stderr=""),
-            subprocess.CompletedProcess(["git", "status", "--porcelain"], 0, stdout=" M main.py\n", stderr=""),
-        ]
-
-        manager._update_bot_from_repo("TestBot", bot_config, directory)
-
-    assert run_mock.call_count == 2
-    force_mock.assert_called_once_with(
+    sync_mock.assert_called_once_with(
         "TestBot",
         directory,
         bot_config["repo_url"],
         [".env", "config/local.yaml"],
+        True,
+        "develop",
     )
+
+
+def test_build_github_archive_urls_from_standard_repo_url(tmp_path):
+    manager, _ = _create_manager(tmp_path, auto_update=True)
+
+    urls = manager._build_github_archive_urls("https://github.com/Gelvey/Task-Master.git")
+
+    assert urls == [
+        "https://codeload.github.com/Gelvey/Task-Master/zip/refs/heads/main",
+        "https://codeload.github.com/Gelvey/Task-Master/zip/refs/heads/master",
+    ]
+
+
+def test_build_github_archive_urls_prefers_explicit_branch(tmp_path):
+    manager, _ = _create_manager(tmp_path, auto_update=True)
+
+    urls = manager._build_github_archive_urls("https://github.com/Gelvey/Task-Master", preferred_branch="develop")
+
+    assert urls[0] == "https://codeload.github.com/Gelvey/Task-Master/zip/refs/heads/develop"
 
 
 def test_update_bot_from_repo_skips_when_target_is_orchestrator_directory(tmp_path):
     manager, _ = _create_manager(tmp_path, auto_update=True)
     bot_config = manager.config["bots"]["TestBot"]
 
-    with patch("main.subprocess.run") as run_mock:
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
         manager._update_bot_from_repo("TestBot", bot_config, manager.base_dir)
 
-    run_mock.assert_not_called()
+    sync_mock.assert_not_called()
 
 
 def test_update_bot_from_repo_skips_when_target_symlinks_to_orchestrator(tmp_path):
@@ -181,7 +145,7 @@ def test_update_bot_from_repo_skips_when_target_symlinks_to_orchestrator(tmp_pat
     except OSError:
         pytest.skip("Symlinks are not supported on this environment")
 
-    with patch("main.subprocess.run") as run_mock:
+    with patch.object(manager, "_sync_bot_from_archive", return_value=True) as sync_mock:
         manager._update_bot_from_repo("TestBot", bot_config, str(symlink_path))
 
-    run_mock.assert_not_called()
+    sync_mock.assert_not_called()

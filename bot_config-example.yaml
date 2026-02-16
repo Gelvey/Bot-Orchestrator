@@ -16,6 +16,7 @@ bots:
     directory: ChatAssistant
     description: Minimal chat assistant example
     repo_url: https://github.com/example/ChatAssistant.git
+    repo_branch: main
     auto_update: true
     force_sync: false
     preserve_files:

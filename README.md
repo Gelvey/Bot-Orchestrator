@@ -14,12 +14,14 @@ Single-process manager for starting, stopping, and monitoring multiple Python bo
 ## Repository Files
 
 - `main.py`: Orchestrator entrypoint and `BotManager`
-- `bot_config.yaml`: Active runtime configuration (required at runtime)
+- `bot_config.yaml`: Active runtime configuration (required at runtime, intentionally untracked)
 - `bot_config-example.yaml`: Template you should copy from
 - `bot_commands.txt`: Runtime command queue file (auto-created if missing)
 - `bot_states.db`: SQLite state database (auto-created)
 - `logs/bot_manager.log`: Manager log file (auto-created)
 - `examples/*/main.py`: Minimal bot examples
+
+Note: `bot_config.yaml` is a local runtime file and should not be committed.
 
 ## Quick Start
 
@@ -90,6 +92,7 @@ bots:
 		color: cyan
 		description: Optional human-readable description
 		repo_url: https://github.com/owner/repo.git
+		repo_branch: main
 		auto_update: true
 		force_sync: false
 		preserve_files:
@@ -108,9 +111,10 @@ global_settings:
 - `directory` (required): Bot working directory. Relative paths resolve from the orchestrator directory.
 - `color` (optional): Console prefix color (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`)
 - `description` (optional): Informational text only
-- `repo_url` (optional): Enables Git auto-update behavior when present
+- `repo_url` (optional): Enables archive-based auto-update behavior when present
+- `repo_branch` (optional): Preferred branch name for archive downloads (fallback order is configured branch, then `main`, then `master`)
 - `auto_update` (optional, default `true` if `repo_url` exists): Toggle auto-update
-- `force_sync` (optional, default `false`): If local git changes exist, force-sync with remote instead of skipping update
+- `force_sync` (optional, default `false`): Replace directory contents with archive contents; when `false`, archive files are merged into existing directory
 - `preserve_files` (optional): List of relative files/directories to restore after force-sync
 
 ### Auto-update behavior
@@ -118,18 +122,12 @@ global_settings:
 When enabled, update flow is:
 
 1. Verify directory exists
-2. Verify the directory is in a git repo (or bootstrap git metadata)
-3. Check working tree cleanliness
-4. Verify `origin` matches `repo_url`
-5. Run `git pull --ff-only`
+2. Validate update target does not overlap orchestrator root path
+3. Build GitHub codeload archive URL from `repo_url`
+4. Download and extract branch archive
+5. Sync extracted files into bot directory
 
-If local changes are detected:
-
-- `force_sync: false` -> update is skipped
-- `force_sync: true` -> manager:
-	- backs up each path in `preserve_files`
-	- runs fetch + hard reset to remote default branch
-	- restores backed-up files/directories
+If `force_sync: true`, manager clears directory contents before sync. In both modes, configured `preserve_files` entries are backed up and restored after sync.
 
 ### `preserve_files` rules
 

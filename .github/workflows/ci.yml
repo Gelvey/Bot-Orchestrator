@@ -18,9 +18,13 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Prepare test fixtures
         run: |
-          if [ ! -f bot_config.yaml ]; then
-            cp bot_config-example.yaml bot_config.yaml
-          fi
+          cat > bot_config.yaml << 'EOF'
+          bots:
+            CIHelperBot:
+              script: main.py
+              directory: examples/HelperBot
+              color: yellow
+          EOF
           touch bot_commands.txt
       - name: Run tests
         run: pytest -q

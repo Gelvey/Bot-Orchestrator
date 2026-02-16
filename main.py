@@ -10,6 +10,10 @@ import yaml
 import sqlite3
 import shutil
 import tempfile
+import zipfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Dict, List, Optional, Tuple
 from threading import Event
 from contextlib import closing
@@ -227,9 +231,28 @@ class BotManager:
                 raise ValueError("Invalid configuration format: missing 'bots' section")
             
             # Validate bot configurations
+            rejected_bots: List[str] = []
             for bot_name, bot_config in config['bots'].items():
                 if 'script' not in bot_config or 'directory' not in bot_config:
                     raise ValueError(f"Bot '{bot_name}' is missing required fields (script, directory)")
+
+                directory_value = bot_config.get('directory')
+                if not isinstance(directory_value, str) or not directory_value.strip():
+                    raise ValueError(f"Bot '{bot_name}' has invalid directory value")
+
+                resolved_directory = os.path.join(self.base_dir, directory_value)
+                if not self._is_safe_bot_directory(resolved_directory):
+                    self.logger.warning(
+                        f"Rejecting bot '{bot_name}': unsafe directory '{directory_value}' resolves to "
+                        f"'{os.path.realpath(os.path.abspath(resolved_directory))}'"
+                    )
+                    rejected_bots.append(bot_name)
+
+            for rejected_bot in rejected_bots:
+                config['bots'].pop(rejected_bot, None)
+
+            if not config['bots']:
+                raise ValueError("No valid bots remain after directory safety validation")
             
             self.logger.info(f"Loaded configuration for {len(config['bots'])} bots")
             return config
@@ -449,10 +472,26 @@ class BotManager:
 
         return True
 
+    def _is_safe_bot_directory(self, directory: str) -> bool:
+        """
+        Validate bot runtime directory is not a dangerous location like
+        container root, common container home root, or orchestrator root.
+        """
+        target_abs = os.path.realpath(os.path.abspath(directory))
+        base_dir_abs = os.path.realpath(os.path.abspath(self.base_dir))
+
+        blocked_paths = {
+            os.path.realpath('/'),
+            os.path.realpath('/home/container'),
+            base_dir_abs,
+        }
+
+        return target_abs not in blocked_paths
+
     def _get_preserve_files(self, bot_config: Dict) -> List[str]:
         """
         Return a list of relative file paths that should be preserved across
-        forced git synchronization.
+        archive synchronization.
         """
         preserve_files = bot_config.get('preserve_files', [])
         if not isinstance(preserve_files, list):
@@ -465,247 +504,212 @@ class BotManager:
                 normalized_paths.append(preserve_path.strip())
         return normalized_paths
 
-    def _resolve_remote_target_ref(self, directory: str) -> Optional[str]:
+    def _build_github_archive_urls(self, repo_url: str, preferred_branch: Optional[str] = None) -> List[str]:
         """
-        Resolve the best remote target ref for hard reset.
+        Build candidate codeload archive URLs from a GitHub repository URL.
         """
-        head_result = subprocess.run(
-            ['git', 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=GIT_COMMAND_TIMEOUT
-        )
+        normalized_url = repo_url.strip()
+        parsed = urllib.parse.urlparse(normalized_url)
 
-        if head_result.returncode == 0:
-            head_ref = head_result.stdout.strip()
-            if head_ref.startswith('origin/'):
-                return head_ref
+        if parsed.netloc.lower() == 'codeload.github.com' and '/zip/' in parsed.path:
+            return [normalized_url]
 
-        for fallback_branch in ('origin/main', 'origin/master'):
-            branch_check = subprocess.run(
-                ['git', 'show-ref', '--verify', '--quiet', f'refs/remotes/{fallback_branch}'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
+        repo_path = ""
+        if normalized_url.startswith('git@github.com:'):
+            repo_path = normalized_url.split(':', 1)[1]
+        elif parsed.netloc.lower().endswith('github.com'):
+            repo_path = parsed.path
+
+        repo_path = repo_path.strip('/')
+        if repo_path.endswith('.git'):
+            repo_path = repo_path[:-4]
+
+        path_parts = repo_path.split('/')
+        if len(path_parts) < 2:
+            return []
+
+        owner = path_parts[0]
+        repo = path_parts[1]
+
+        branch_candidates: List[str] = []
+        if isinstance(preferred_branch, str) and preferred_branch.strip():
+            branch_candidates.append(preferred_branch.strip())
+        branch_candidates.extend(['main', 'master'])
+
+        seen = set()
+        archive_urls: List[str] = []
+        for branch in branch_candidates:
+            if branch in seen:
+                continue
+            seen.add(branch)
+            archive_urls.append(f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}")
+
+        return archive_urls
+
+    def _download_and_extract_archive(self, bot_name: str, repo_url: str, work_dir: str, preferred_branch: Optional[str] = None) -> Optional[str]:
+        """
+        Download and extract a GitHub repository archive.
+        Returns path to extracted source directory on success.
+        """
+        archive_urls = self._build_github_archive_urls(repo_url, preferred_branch)
+        if not archive_urls:
+            self.logger.warning(
+                f"Auto-update skipped for {bot_name}: unsupported repository URL for archive sync"
             )
-            if branch_check.returncode == 0:
-                return fallback_branch
+            return None
+
+        for index, archive_url in enumerate(archive_urls, start=1):
+            archive_file = os.path.join(work_dir, f"archive-{index}.zip")
+            extract_dir = os.path.join(work_dir, f"extract-{index}")
+
+            try:
+                request = urllib.request.Request(
+                    archive_url,
+                    headers={'User-Agent': 'Bot-Orchestrator/1.0'}
+                )
+                with urllib.request.urlopen(request, timeout=GIT_COMMAND_TIMEOUT) as response:
+                    archive_data = response.read()
+
+                with open(archive_file, 'wb') as file_handle:
+                    file_handle.write(archive_data)
+
+                os.makedirs(extract_dir, exist_ok=True)
+                with zipfile.ZipFile(archive_file, 'r') as zip_handle:
+                    zip_handle.extractall(extract_dir)
+
+                extracted_entries = [
+                    os.path.join(extract_dir, entry)
+                    for entry in os.listdir(extract_dir)
+                ]
+                extracted_directories = [entry for entry in extracted_entries if os.path.isdir(entry)]
+
+                if len(extracted_directories) == 1:
+                    return extracted_directories[0]
+
+                self.logger.warning(
+                    f"Auto-update failed for {bot_name}: unexpected archive layout from {archive_url}"
+                )
+            except urllib.error.HTTPError as http_error:
+                if http_error.code == 404:
+                    continue
+                self.logger.warning(
+                    f"Auto-update failed for {bot_name}: HTTP {http_error.code} while downloading archive"
+                )
+                return None
+            except (urllib.error.URLError, OSError, zipfile.BadZipFile) as archive_error:
+                self.logger.warning(
+                    f"Auto-update failed for {bot_name}: {archive_error}"
+                )
+                return None
 
         return None
 
-    def _force_sync_bot_repo(self, bot_name: str, directory: str, repo_url: str, preserve_files: List[str]) -> bool:
+    def _snapshot_preserved_paths(self, bot_name: str, directory: str, preserve_files: List[str], backup_dir: str) -> List[Tuple[str, str, bool]]:
         """
-        Force-sync repository to the remote default branch while preserving
-        configured local files.
+        Snapshot configured preserve paths for later restoration.
+        """
+        preserved_entries: List[Tuple[str, str, bool]] = []
+        directory_abs = os.path.abspath(directory)
+
+        for relative_path in preserve_files:
+            source_path = os.path.abspath(os.path.join(directory_abs, relative_path))
+            if source_path != directory_abs and not source_path.startswith(directory_abs + os.sep):
+                self.logger.warning(
+                    f"Preserve file skipped for {bot_name}: {relative_path} is outside bot directory"
+                )
+                continue
+
+            if not os.path.exists(source_path):
+                continue
+
+            backup_path = os.path.join(backup_dir, relative_path)
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+
+            if os.path.isdir(source_path):
+                shutil.copytree(source_path, backup_path, dirs_exist_ok=True)
+                preserved_entries.append((relative_path, backup_path, True))
+            else:
+                shutil.copy2(source_path, backup_path)
+                preserved_entries.append((relative_path, backup_path, False))
+
+        return preserved_entries
+
+    def _restore_preserved_paths(self, directory: str, preserved_entries: List[Tuple[str, str, bool]]) -> None:
+        """
+        Restore previously snapshotted preserve paths.
+        """
+        directory_abs = os.path.abspath(directory)
+
+        for relative_path, backup_path, is_dir in preserved_entries:
+            destination = os.path.join(directory_abs, relative_path)
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+
+            if is_dir:
+                if os.path.exists(destination):
+                    shutil.rmtree(destination)
+                shutil.copytree(backup_path, destination)
+            else:
+                shutil.copy2(backup_path, destination)
+
+    def _clear_directory_contents(self, directory: str) -> None:
+        """
+        Remove all contents inside directory without removing the directory itself.
+        """
+        for entry in os.listdir(directory):
+            target_path = os.path.join(directory, entry)
+            if os.path.islink(target_path) or os.path.isfile(target_path):
+                os.unlink(target_path)
+            else:
+                shutil.rmtree(target_path)
+
+    def _sync_bot_from_archive(
+        self,
+        bot_name: str,
+        directory: str,
+        repo_url: str,
+        preserve_files: List[str],
+        force_sync: bool,
+        preferred_branch: Optional[str] = None
+    ) -> bool:
+        """
+        Synchronize bot directory from a GitHub zip archive.
         """
         backup_dir = tempfile.mkdtemp(prefix=f"bot-preserve-{bot_name}-")
-        preserved_entries: List[Tuple[str, str, bool]] = []
+        work_dir = tempfile.mkdtemp(prefix=f"bot-archive-{bot_name}-")
 
         try:
             directory_abs = os.path.abspath(directory)
+            os.makedirs(directory_abs, exist_ok=True)
 
-            for relative_path in preserve_files:
-                source_path = os.path.abspath(os.path.join(directory_abs, relative_path))
-                if source_path != directory_abs and not source_path.startswith(directory_abs + os.sep):
-                    self.logger.warning(
-                        f"Preserve file skipped for {bot_name}: {relative_path} is outside bot directory"
-                    )
-                    continue
-
-                if not os.path.exists(source_path):
-                    continue
-
-                backup_path = os.path.join(backup_dir, relative_path)
-                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-
-                if os.path.isdir(source_path):
-                    shutil.copytree(source_path, backup_path, dirs_exist_ok=True)
-                    preserved_entries.append((relative_path, backup_path, True))
-                else:
-                    shutil.copy2(source_path, backup_path)
-                    preserved_entries.append((relative_path, backup_path, False))
-
-            remote_result = subprocess.run(
-                ['git', 'remote', 'get-url', 'origin'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-
-            if remote_result.returncode != 0:
-                add_remote_result = subprocess.run(
-                    ['git', 'remote', 'add', 'origin', repo_url],
-                    cwd=directory,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=GIT_COMMAND_TIMEOUT
-                )
-                if add_remote_result.returncode != 0:
-                    self.logger.warning(
-                        f"Force sync failed for {bot_name}: unable to add origin "
-                        f"({add_remote_result.stderr.strip()})"
-                    )
-                    return False
-            elif remote_result.stdout.strip() != repo_url:
-                set_remote_result = subprocess.run(
-                    ['git', 'remote', 'set-url', 'origin', repo_url],
-                    cwd=directory,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=GIT_COMMAND_TIMEOUT
-                )
-                if set_remote_result.returncode != 0:
-                    self.logger.warning(
-                        f"Force sync failed for {bot_name}: unable to set origin URL "
-                        f"({set_remote_result.stderr.strip()})"
-                    )
-                    return False
-
-            fetch_result = subprocess.run(
-                ['git', 'fetch', 'origin'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-            if fetch_result.returncode != 0:
-                self.logger.warning(
-                    f"Force sync failed for {bot_name}: git fetch failed ({fetch_result.stderr.strip()})"
-                )
+            preserved_entries = self._snapshot_preserved_paths(bot_name, directory_abs, preserve_files, backup_dir)
+            archive_source = self._download_and_extract_archive(bot_name, repo_url, work_dir, preferred_branch)
+            if not archive_source:
                 return False
 
-            target_ref = self._resolve_remote_target_ref(directory)
-            if not target_ref:
-                self.logger.warning(f"Force sync failed for {bot_name}: unable to resolve remote default branch")
-                return False
+            if force_sync:
+                self._clear_directory_contents(directory_abs)
 
-            reset_result = subprocess.run(
-                ['git', 'reset', '--hard', target_ref],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-            if reset_result.returncode != 0:
-                self.logger.warning(
-                    f"Force sync failed for {bot_name}: git reset failed ({reset_result.stderr.strip()})"
-                )
-                return False
+            shutil.copytree(archive_source, directory_abs, dirs_exist_ok=True)
 
-            for relative_path, backup_path, is_dir in preserved_entries:
-                destination = os.path.join(directory_abs, relative_path)
-                os.makedirs(os.path.dirname(destination), exist_ok=True)
-
-                if is_dir:
-                    if os.path.exists(destination):
-                        shutil.rmtree(destination)
-                    shutil.copytree(backup_path, destination)
-                else:
-                    shutil.copy2(backup_path, destination)
+            if preserved_entries:
+                self._restore_preserved_paths(directory_abs, preserved_entries)
 
             self.logger.info(
-                f"Force sync completed for {bot_name} ({len(preserved_entries)} preserved path(s))"
+                f"Auto-update completed for {bot_name} via archive sync "
+                f"({'force' if force_sync else 'merge'} mode, {len(preserved_entries)} preserved path(s))"
             )
             return True
+        except Exception as sync_error:
+            self.logger.warning(f"Auto-update failed for {bot_name}: {sync_error}")
+            return False
         finally:
             shutil.rmtree(backup_dir, ignore_errors=True)
-
-    def _attempt_git_bootstrap(self, bot_name: str, directory: str, repo_url: str) -> bool:
-        """
-        Attempt to bootstrap git metadata for a bot directory when code exists
-        but repository metadata is missing.
-        """
-        self.logger.info(f"Auto-update bootstrap for {bot_name}: initializing git metadata in {directory}")
-
-        init_result = subprocess.run(
-            ['git', 'init'],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=GIT_COMMAND_TIMEOUT
-        )
-        if init_result.returncode != 0:
-            self.logger.warning(
-                f"Auto-update bootstrap failed for {bot_name}: git init failed ({init_result.stderr.strip()})"
-            )
-            return False
-
-        add_remote_result = subprocess.run(
-            ['git', 'remote', 'add', 'origin', repo_url],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=GIT_COMMAND_TIMEOUT
-        )
-        if add_remote_result.returncode != 0:
-            set_remote_result = subprocess.run(
-                ['git', 'remote', 'set-url', 'origin', repo_url],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-            if set_remote_result.returncode != 0:
-                self.logger.warning(
-                    f"Auto-update bootstrap failed for {bot_name}: unable to configure origin remote "
-                    f"({set_remote_result.stderr.strip() or add_remote_result.stderr.strip()})"
-                )
-                return False
-
-        fetch_result = subprocess.run(
-            ['git', 'fetch', 'origin'],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=GIT_COMMAND_TIMEOUT
-        )
-        if fetch_result.returncode != 0:
-            self.logger.warning(
-                f"Auto-update bootstrap failed for {bot_name}: git fetch failed ({fetch_result.stderr.strip()})"
-            )
-            return False
-
-        target_ref = self._resolve_remote_target_ref(directory)
-        if not target_ref:
-            self.logger.warning(f"Auto-update bootstrap failed for {bot_name}: unable to resolve remote default branch")
-            return False
-
-        reset_result = subprocess.run(
-            ['git', 'reset', '--hard', target_ref],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=GIT_COMMAND_TIMEOUT
-        )
-        if reset_result.returncode == 0:
-            self.logger.info(f"Auto-update bootstrap completed for {bot_name} using {target_ref}")
-            return True
-
-        self.logger.warning(
-            f"Auto-update bootstrap failed for {bot_name}: git reset failed ({reset_result.stderr.strip()})"
-        )
-        return False
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def _update_bot_from_repo(self, bot_name: str, bot_config: Dict, directory: str):
         """
-        Optionally update bot code from configured GitHub repository.
-        Validates git repo state (clean working tree, origin URL match) and uses
-        `git pull --ff-only` to avoid unintended overwrites.
+        Optionally update bot code from configured GitHub repository
+        by downloading a zip archive and syncing into bot directory.
         """
         if not self._should_auto_update_bot(bot_config):
             return
@@ -725,100 +729,24 @@ class BotManager:
             )
             return
 
-        try:
-            repo_check_result = subprocess.run(
-                ['git', 'rev-parse', '--show-toplevel'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
+        force_sync = self._should_force_sync_bot(bot_config)
+        preserve_files = self._get_preserve_files(bot_config)
+        preferred_branch = bot_config.get('repo_branch') if isinstance(bot_config.get('repo_branch'), str) else None
+
+        if force_sync:
+            self.logger.warning(
+                f"Force sync enabled for {bot_name}; replacing bot directory contents with repository archive"
             )
-            if repo_check_result.returncode != 0:
-                if not self._attempt_git_bootstrap(bot_name, directory, repo_url):
-                    reason = repo_check_result.stderr.strip() or f"{directory} is not in a git repository"
-                    self.logger.warning(f"Auto-update skipped for {bot_name}: {reason}")
-                    return
 
-                repo_check_result = subprocess.run(
-                    ['git', 'rev-parse', '--show-toplevel'],
-                    cwd=directory,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=GIT_COMMAND_TIMEOUT
-                )
-                if repo_check_result.returncode != 0:
-                    reason = repo_check_result.stderr.strip() or f"{directory} is not in a git repository"
-                    self.logger.warning(f"Auto-update skipped for {bot_name}: {reason}")
-                    return
-
-            status_result = subprocess.run(
-                ['git', 'status', '--porcelain'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-            if status_result.returncode != 0:
-                self.logger.warning(
-                    f"Auto-update skipped for {bot_name}: unable to check git status ({status_result.stderr.strip()})"
-                )
-                return
-
-            if status_result.stdout.strip():
-                if self._should_force_sync_bot(bot_config):
-                    preserve_files = self._get_preserve_files(bot_config)
-                    self.logger.warning(
-                        f"Local changes detected for {bot_name}; force_sync is enabled, forcing repository sync"
-                    )
-                    if self._force_sync_bot_repo(bot_name, directory, repo_url, preserve_files):
-                        return
-
-                    self.logger.warning(f"Auto-update skipped for {bot_name}: force sync failed")
-                    return
-
-                self.logger.warning(f"Auto-update skipped for {bot_name}: local changes detected in {directory}")
-                return
-
-            remote_result = subprocess.run(
-                ['git', 'remote', 'get-url', 'origin'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-            if remote_result.returncode != 0:
-                self.logger.warning(
-                    f"Auto-update skipped for {bot_name}: unable to read origin remote ({remote_result.stderr.strip()})"
-                )
-                return
-
-            current_remote = remote_result.stdout.strip()
-            if current_remote != repo_url:
-                self.logger.warning(
-                    f"Auto-update skipped for {bot_name}: configured repo URL does not match origin remote"
-                )
-                return
-
-            pull_result = subprocess.run(
-                ['git', 'pull', '--ff-only'],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=GIT_COMMAND_TIMEOUT
-            )
-            if pull_result.returncode == 0:
-                self.logger.info(f"Auto-update completed for {bot_name}: {pull_result.stdout.strip()}")
-            else:
-                self.logger.warning(
-                    f"Auto-update failed for {bot_name}: {pull_result.stderr.strip() or pull_result.stdout.strip()}"
-                )
-        except Exception as e:
-            self.logger.warning(f"Auto-update failed for {bot_name}: {e}")
+        if not self._sync_bot_from_archive(
+            bot_name,
+            directory,
+            repo_url,
+            preserve_files,
+            force_sync,
+            preferred_branch,
+        ):
+            self.logger.warning(f"Auto-update skipped for {bot_name}: archive sync failed")
 
     def start_bot(self, bot_name: str):
         """
