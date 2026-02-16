@@ -399,6 +399,102 @@ class BotManager:
             return False
         return bot_config.get('auto_update', True)
 
+    def _attempt_git_bootstrap(self, bot_name: str, directory: str, repo_url: str) -> bool:
+        """
+        Attempt to bootstrap git metadata for a bot directory when code exists
+        but repository metadata is missing.
+        """
+        self.logger.info(f"Auto-update bootstrap for {bot_name}: initializing git metadata in {directory}")
+
+        init_result = subprocess.run(
+            ['git', 'init'],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_COMMAND_TIMEOUT
+        )
+        if init_result.returncode != 0:
+            self.logger.warning(
+                f"Auto-update bootstrap failed for {bot_name}: git init failed ({init_result.stderr.strip()})"
+            )
+            return False
+
+        add_remote_result = subprocess.run(
+            ['git', 'remote', 'add', 'origin', repo_url],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_COMMAND_TIMEOUT
+        )
+        if add_remote_result.returncode != 0:
+            set_remote_result = subprocess.run(
+                ['git', 'remote', 'set-url', 'origin', repo_url],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT
+            )
+            if set_remote_result.returncode != 0:
+                self.logger.warning(
+                    f"Auto-update bootstrap failed for {bot_name}: unable to configure origin remote "
+                    f"({set_remote_result.stderr.strip() or add_remote_result.stderr.strip()})"
+                )
+                return False
+
+        fetch_result = subprocess.run(
+            ['git', 'fetch', 'origin'],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_COMMAND_TIMEOUT
+        )
+        if fetch_result.returncode != 0:
+            self.logger.warning(
+                f"Auto-update bootstrap failed for {bot_name}: git fetch failed ({fetch_result.stderr.strip()})"
+            )
+            return False
+
+        branch_name = None
+        head_result = subprocess.run(
+            ['git', 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_COMMAND_TIMEOUT
+        )
+        if head_result.returncode == 0:
+            head_ref = head_result.stdout.strip()
+            if head_ref.startswith('origin/'):
+                branch_name = head_ref.split('/', 1)[1]
+
+        reset_targets: List[str] = []
+        if branch_name:
+            reset_targets.append(f'origin/{branch_name}')
+        for fallback_branch in ('origin/main', 'origin/master'):
+            if fallback_branch not in reset_targets:
+                reset_targets.append(fallback_branch)
+
+        for target_ref in reset_targets:
+            reset_result = subprocess.run(
+                ['git', 'reset', '--hard', target_ref],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT
+            )
+            if reset_result.returncode == 0:
+                self.logger.info(f"Auto-update bootstrap completed for {bot_name} using {target_ref}")
+                return True
+
+        self.logger.warning(f"Auto-update bootstrap failed for {bot_name}: unable to resolve remote default branch")
+        return False
+
     def _update_bot_from_repo(self, bot_name: str, bot_config: Dict, directory: str):
         """
         Optionally update bot code from configured GitHub repository.
@@ -414,12 +510,34 @@ class BotManager:
             self.logger.warning(f"Auto-update skipped for {bot_name}: directory {directory} not found")
             return
 
-        git_dir = os.path.join(directory, '.git')
-        if not os.path.isdir(git_dir):
-            self.logger.warning(f"Auto-update skipped for {bot_name}: {directory} is not a git repository")
-            return
-
         try:
+            repo_check_result = subprocess.run(
+                ['git', 'rev-parse', '--show-toplevel'],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GIT_COMMAND_TIMEOUT
+            )
+            if repo_check_result.returncode != 0:
+                if not self._attempt_git_bootstrap(bot_name, directory, repo_url):
+                    reason = repo_check_result.stderr.strip() or f"{directory} is not in a git repository"
+                    self.logger.warning(f"Auto-update skipped for {bot_name}: {reason}")
+                    return
+
+                repo_check_result = subprocess.run(
+                    ['git', 'rev-parse', '--show-toplevel'],
+                    cwd=directory,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=GIT_COMMAND_TIMEOUT
+                )
+                if repo_check_result.returncode != 0:
+                    reason = repo_check_result.stderr.strip() or f"{directory} is not in a git repository"
+                    self.logger.warning(f"Auto-update skipped for {bot_name}: {reason}")
+                    return
+
             status_result = subprocess.run(
                 ['git', 'status', '--porcelain'],
                 cwd=directory,
