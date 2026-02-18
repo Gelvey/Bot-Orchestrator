@@ -61,6 +61,7 @@ python main.py list
 ## Runtime Command File
 
 While `start_all` is running, the manager polls `bot_commands.txt` every 2 seconds and executes commands.
+`bot_commands.txt` is intentionally plain (usually empty between polls); command format and examples are documented here.
 
 Supported command actions:
 

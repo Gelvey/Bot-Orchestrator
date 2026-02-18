@@ -1,11 +1,96 @@
 import os
 import sys
 import threading
+import time
 
 import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from main import BotManager
+
+
+def test_process_command_file_dispatches_restart_action(tmp_path, monkeypatch):
+    bot_dir = tmp_path / "TestBot"
+    bot_dir.mkdir()
+
+    config = {
+        "bots": {
+            "TestBot": {
+                "script": "main.py",
+                "directory": str(bot_dir),
+            }
+        }
+    }
+
+    config_path = tmp_path / "bot_config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    commands_path = tmp_path / "bot_commands.txt"
+    commands_path.write_text("restart TestBot\n")
+
+    manager = BotManager(
+        config_path=str(config_path),
+        commands_file=str(commands_path),
+        db_path=str(tmp_path / "bot_states.db"),
+    )
+
+    called = []
+
+    def fake_restart(bot_name):
+        called.append(bot_name)
+        return True
+
+    monkeypatch.setattr(manager, "restart_bot", fake_restart)
+
+    original_sleep = time.sleep
+
+    def stop_after_first_iteration(_seconds):
+        manager.shutdown_event.set()
+        return None
+
+    monkeypatch.setattr(time, "sleep", stop_after_first_iteration)
+
+    try:
+        manager.shutdown_event.clear()
+        manager._process_command_file()
+    finally:
+        monkeypatch.setattr(time, "sleep", original_sleep)
+
+    assert called == ["TestBot"]
+
+
+def test_restart_bot_starts_when_not_running(tmp_path, monkeypatch):
+    bot_dir = tmp_path / "TestBot"
+    bot_dir.mkdir()
+
+    config = {
+        "bots": {
+            "TestBot": {
+                "script": "main.py",
+                "directory": str(bot_dir),
+            }
+        }
+    }
+
+    config_path = tmp_path / "bot_config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    manager = BotManager(
+        config_path=str(config_path),
+        commands_file=str(tmp_path / "bot_commands.txt"),
+        db_path=str(tmp_path / "bot_states.db"),
+    )
+
+    start_calls = []
+
+    def fake_start(bot_name):
+        start_calls.append(bot_name)
+        return True
+
+    monkeypatch.setattr(manager, "start_bot", fake_start)
+
+    assert manager.restart_bot("TestBot") is True
+    assert start_calls == ["TestBot"]
 
 
 def test_process_command_file_ignores_comment_lines(tmp_path):

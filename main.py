@@ -121,8 +121,7 @@ class BotManager:
 
             if not os.path.exists(self.commands_file_path):
                 with open(self.commands_file_path, 'w') as f:
-                    f.write('# Commands will be appended here by users or other systems\n')
-                    f.write('# Example: start ARKBots\n')
+                    f.write('')
 
                 if log_if_created:
                     self.logger.warning(f"Recreated missing command file: {self.commands_file_path}")
@@ -976,9 +975,18 @@ class BotManager:
         """
         Restart a specific bot
         """
-        with self.lock:  # Ensure thread-safe access to processes
-            self.stop_bot(bot_name)
+        try:
+            with self.lock:
+                is_running = bot_name in self.processes
+
+            if is_running and not self.stop_bot(bot_name):
+                self.logger.warning(f"Failed to stop {bot_name} during restart")
+                return False
+
             return self.start_bot(bot_name)
+        except Exception as e:
+            self.logger.exception(f"An error occurred while restarting bot {bot_name}: {e}")
+            return False
 
     def pause_bot(self, bot_name: str):
         """
