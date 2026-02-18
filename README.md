@@ -8,6 +8,7 @@ Single-process manager for starting, stopping, and monitoring multiple Python bo
 - Restore previously-running bots on startup (`start_all`)
 - Persist state in SQLite (`bot_states.db`)
 - Poll and execute runtime commands from `bot_commands.txt`
+- **stdin/stdout command interface** for Docker panel integration (Pterodactyl, Pelican.dev)
 - Stream bot stdout/stderr with per-bot color prefixes
 - Optional per-bot Git auto-update with safety checks
 
@@ -20,6 +21,8 @@ Single-process manager for starting, stopping, and monitoring multiple Python bo
 - `bot_states.db`: SQLite state database (auto-created)
 - `logs/bot_manager.log`: Manager log file (auto-created)
 - `examples/*/main.py`: Minimal bot examples
+- `STDIN_INTEGRATION.md`: Detailed stdin/stdout integration guide for Docker panels
+- `demo_stdin.sh`: Interactive demo script for stdin mode
 
 Note: `bot_config.yaml` is a local runtime file and should not be committed.
 
@@ -81,6 +84,64 @@ echo "resume DataBot" >> bot_commands.txt
 echo "status_all now" >> bot_commands.txt
 ```
 
+## stdin/stdout Command Interface
+
+**For Docker panel integration** (Pterodactyl, Pelican.dev, etc.)
+
+Enable `stdin_mode` in `global_settings` to process commands from stdin and output responses to stdout. This allows real-time WebSocket-based console interaction in game panel UIs.
+
+### How it works
+
+When `stdin_mode: true` is configured:
+
+- ✅ Orchestrator listens for commands on stdin
+- ✅ Commands execute instantly (no polling delay)
+- ✅ Responses written to stdout: `[ORCHESTRATOR] <command>: <status> - <message>`
+- ✅ File-based commands (`bot_commands.txt`) still work simultaneously
+
+### Supported Commands
+
+All standard commands work via stdin:
+
+```
+start <BotName>       Start a bot
+stop <BotName>        Stop a bot
+restart <BotName>     Restart a bot
+pause <BotName>       Pause (suspend) a bot
+resume <BotName>      Resume a paused bot
+status <BotName>      Get bot status
+list                  List all bots
+```
+
+### Usage Example
+
+Start orchestrator with stdin mode enabled:
+
+```bash
+python main.py start_all
+```
+
+Send commands (interactively or via WebSocket):
+
+```bash
+start HelperBot
+status HelperBot
+list
+stop HelperBot
+```
+
+### Response Format
+
+```
+[ORCHESTRATOR] start HelperBot: SUCCESS - Bot HelperBot started
+[ORCHESTRATOR] status HelperBot: SUCCESS - Bot HelperBot is running. Previously Running
+[ORCHESTRATOR] stop HelperBot: SUCCESS - Bot HelperBot stopped
+[ORCHESTRATOR] list: SUCCESS - Listed all bots
+```
+
+> **📖 See [STDIN_INTEGRATION.md](STDIN_INTEGRATION.md) for detailed integration guide**
+```
+
 ## Configuration Reference (`bot_config.yaml`)
 
 Top-level structure:
@@ -102,6 +163,7 @@ bots:
 
 global_settings:
 	suppress_discord_messages: false
+	stdin_mode: false
 	log_directory: logs
 	max_restart_attempts: 3
 	restart_delay: 5
@@ -122,6 +184,7 @@ global_settings:
 ### Global settings keys
 
 - `suppress_discord_messages` (optional, default `false`): Suppress bot output lines that contain both `discord` and `message` for all bots
+- `stdin_mode` (optional, default `false`): Enable stdin/stdout command interface for Docker panel integration (Pterodactyl, Pelican.dev). When enabled, commands from stdin are processed and responses are written to stdout
 - `log_directory` (optional): Log directory name
 - `max_restart_attempts` (optional): Reserved for restart policy
 - `restart_delay` (optional): Reserved for restart policy delay in seconds

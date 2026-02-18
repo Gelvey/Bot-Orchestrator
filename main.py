@@ -399,6 +399,15 @@ class BotManager:
         )
         command_thread.start()
 
+        # Start stdin command monitoring thread if enabled
+        if self._is_stdin_mode_enabled():
+            self.logger.info("stdin mode enabled - listening for commands on stdin")
+            stdin_thread = threading.Thread(
+                target=self._process_stdin_commands,
+                daemon=True
+            )
+            stdin_thread.start()
+
         # Keep main thread running with improved interruption handling
         try:
             while not self.shutdown_event.is_set():
@@ -506,6 +515,26 @@ class BotManager:
         )
         return False
 
+    def _is_stdin_mode_enabled(self) -> bool:
+        """
+        Return whether stdin command processing mode is enabled.
+        When enabled, the orchestrator will listen for commands on stdin
+        and output responses to stdout, enabling integration with Docker
+        panel systems like Pterodactyl and Pelican.dev.
+        """
+        global_settings = self.config.get('global_settings', {})
+        if not isinstance(global_settings, dict):
+            return False
+
+        stdin_mode = global_settings.get('stdin_mode', False)
+        if isinstance(stdin_mode, bool):
+            return stdin_mode
+
+        self.logger.warning(
+            "Invalid global_settings.stdin_mode value; expected boolean, defaulting to false"
+        )
+        return False
+
     def _should_suppress_discord_output_line(self, line: str, suppress_discord_messages: bool) -> bool:
         """
         Determine whether a bot output line should be suppressed when
@@ -516,6 +545,18 @@ class BotManager:
 
         normalized_line = line.casefold()
         return 'discord' in normalized_line and 'message' in normalized_line
+
+    def _output_command_response(self, command: str, success: bool, message: str):
+        """
+        Output a command response to stdout in a structured format.
+        Used when stdin_mode is enabled for Docker panel integration.
+        Format: [ORCHESTRATOR] <command>: <status> - <message>
+        """
+        status = "SUCCESS" if success else "FAILED"
+        response = f"[ORCHESTRATOR] {command}: {status} - {message}"
+        print(response)
+        sys.stdout.flush()
+        self.logger.info(f"Command response: {response}")
 
     def _get_preserve_files(self, bot_config: Dict) -> List[str]:
         """
@@ -861,6 +902,112 @@ class BotManager:
             self.logger.error(f"Failed to start {bot_name}: {e}")
             return False
 
+    def _execute_command(self, command: str, output_response: bool = False) -> Tuple[bool, str]:
+        """
+        Execute a single command and return success status and message.
+        
+        Args:
+            command: Command string to execute
+            output_response: Whether to output response to stdout (for stdin mode)
+            
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            command = command.strip()
+            if not command:
+                return (False, "Empty command")
+            
+            if command.startswith('#'):
+                return (True, "Comment line ignored")
+            
+            # Parse command
+            parts = command.split()
+            if len(parts) < 2:
+                msg = f"Invalid command format: {command}"
+                self.logger.warning(msg)
+                return (False, msg)
+            
+            action, bot_name = parts[0], parts[1]
+            success = False
+            message = ""
+            
+            # Execute command
+            if action == 'start':
+                success = self.start_bot(bot_name)
+                message = f"Bot {bot_name} {'started' if success else 'failed to start'}"
+            elif action == 'stop':
+                success = self.stop_bot(bot_name)
+                message = f"Bot {bot_name} {'stopped' if success else 'failed to stop'}"
+            elif action == 'restart':
+                success = self.restart_bot(bot_name)
+                message = f"Bot {bot_name} {'restarted' if success else 'failed to restart'}"
+            elif action == 'pause':
+                success = self.pause_bot(bot_name)
+                message = f"Bot {bot_name} {'paused' if success else 'failed to pause'}"
+            elif action == 'resume':
+                success = self.resume_bot(bot_name)
+                message = f"Bot {bot_name} {'resumed' if success else 'failed to resume'}"
+            elif action == 'status':
+                status = self.get_bot_status(bot_name)
+                success = True
+                message = status
+            elif action == 'status_all' or action == 'list':
+                self.list_bots()
+                success = True
+                message = "Listed all bots"
+            else:
+                message = f"Unknown action: {action}"
+                self.logger.warning(message)
+                return (False, message)
+            
+            if output_response:
+                self._output_command_response(command, success, message)
+            
+            return (success, message)
+            
+        except Exception as cmd_error:
+            error_msg = f"Error executing command '{command}': {cmd_error}"
+            self.logger.error(error_msg)
+            if output_response:
+                self._output_command_response(command, False, str(cmd_error))
+            return (False, error_msg)
+
+    def _process_stdin_commands(self):
+        """
+        Continuously monitor and process commands from stdin.
+        Used for Docker panel integration (Pterodactyl, Pelican.dev, etc.)
+        """
+        self.logger.info("stdin command processing thread started")
+        
+        try:
+            while not self.shutdown_event.is_set():
+                try:
+                    # Read line from stdin with timeout handling
+                    # Note: stdin.readline() will block until newline or EOF
+                    line = sys.stdin.readline()
+                    
+                    if not line:  # EOF reached
+                        self.logger.info("stdin EOF reached, stopping stdin command processing")
+                        break
+                    
+                    command = line.strip()
+                    if command:
+                        self.logger.info(f"Processing stdin command: {command}")
+                        self._execute_command(command, output_response=True)
+                        
+                except EOFError:
+                    self.logger.info("stdin closed, stopping stdin command processing")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error in stdin command processing: {e}")
+                    time.sleep(1)
+                    
+        except Exception as e:
+            self.logger.error(f"Fatal error in stdin processing thread: {e}")
+        finally:
+            self.logger.info("stdin command processing thread has stopped.")
+
     def _process_command_file(self):
         """
         Continuously monitor and process commands from the file.
@@ -878,40 +1025,8 @@ class BotManager:
                     if commands:
                         # Process each command
                         for command in commands:
-                            command = command.strip()
-                            if not command:
-                                continue
-                            if command.startswith('#'):
-                                continue
-                            
-                            self.logger.info(f"Processing command: {command}")
-                            
-                            # Parse command
-                            parts = command.split()
-                            if len(parts) < 2:
-                                self.logger.warning(f"Invalid command format: {command}")
-                                continue
-                            
-                            action, bot_name = parts[0], parts[1]
-                            
-                            # Execute command
-                            try:
-                                if action == 'start':
-                                    self.start_bot(bot_name)
-                                elif action == 'stop':
-                                    self.stop_bot(bot_name)
-                                elif action == 'restart':
-                                    self.restart_bot(bot_name)
-                                elif action == 'pause':
-                                    self.pause_bot(bot_name)
-                                elif action == 'resume':
-                                    self.resume_bot(bot_name)
-                                elif action == 'status_all':
-                                    self.list_bots()
-                                else:
-                                    self.logger.warning(f"Unknown action: {action}")
-                            except Exception as cmd_error:
-                                self.logger.error(f"Error executing command {command}: {cmd_error}")
+                            self.logger.info(f"Processing file command: {command.strip()}")
+                            self._execute_command(command, output_response=False)
                         
                         # Clear the file after processing
                         f.seek(0)
